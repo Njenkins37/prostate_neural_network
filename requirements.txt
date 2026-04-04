@@ -4,3 +4,4 @@ torch
 SimpleITK
 matplotlib
 scikit-image
+scipy
