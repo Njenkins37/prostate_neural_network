@@ -5,7 +5,8 @@ __pycache__/
 mise.toml
 .vscode/
 
-# Images and Labels.
+# Data, Images and Labels.
+*.npz
 images/*
 labels/*
 
