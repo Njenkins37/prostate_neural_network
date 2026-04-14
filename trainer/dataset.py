@@ -4,6 +4,7 @@ import json
 from pathlib import Path
 from torch.utils.data import Dataset
 
+
 class PICAI25DDataset(Dataset):
     """
     Dynamically loads 3D .npz files and extracts 2.5D slices (z-1, z, z+1) 
@@ -34,9 +35,9 @@ class PICAI25DDataset(Dataset):
             # Parameterized Edge Handling.
             start_z = 0 if self.pad_edges else 1
             end_z = num_slices if self.pad_edges else num_slices - 1
-                
-            # Create an index entry for every single slice.
-            for z in range(num_slices):
+
+            # Create an index entry for every valid slice.
+            for z in range(start_z, end_z):
                 self.samples.append((pid, z, num_slices))
                 
     def __len__(self):
@@ -49,10 +50,10 @@ class PICAI25DDataset(Dataset):
         
         # Load the actual 3D arrays.
         with np.load(npz_path) as data:
-            t2_vol = data['t2']
-            adc_vol = data['adc']
+            t2_vol     = data['t2'].astype(np.float32)
+            adc_vol    = data['adc'].astype(np.float32)
             lesion_vol = data['lesion']
-            
+
         # The 2.5D Slicing Logic (z-1, z, z+1).
         z_min = max(0, z - 1)
         z_max = min(num_slices - 1, z + 1)
@@ -61,14 +62,15 @@ class PICAI25DDataset(Dataset):
         adc_slices = adc_vol[..., z_min:z_max+1]
         
         # Edge-Case Padding: Only triggers if pad_edges=True and z is at boundaries.
-        # If we are at the very bottom (z=0) or top (z=Max) of the prostate, 
+        # If we are at the very bottom (z=0) or top (z=Max) of the prostate,
         # we only have 2 slices. We duplicate the edge slice to force exactly 3 channels.
-        if z == 0:
-            t2_slices = np.concatenate([t2_slices[..., 0:1], t2_slices], axis=-1)
-            adc_slices = np.concatenate([adc_slices[..., 0:1], adc_slices], axis=-1)
-        elif z == num_slices - 1:
-            t2_slices = np.concatenate([t2_slices, t2_slices[..., -1:]], axis=-1)
-            adc_slices = np.concatenate([adc_slices, adc_slices[..., -1:]], axis=-1)
+        if self.pad_edges:
+            if z == 0:
+                t2_slices  = np.concatenate([t2_slices[..., 0:1],  t2_slices], axis=-1)
+                adc_slices = np.concatenate([adc_slices[..., 0:1], adc_slices], axis=-1)
+            elif z == num_slices - 1:
+                t2_slices  = np.concatenate([t2_slices,  t2_slices[..., -1:]], axis=-1)
+                adc_slices = np.concatenate([adc_slices, adc_slices[..., -1:]], axis=-1)
             
         # The Ground Truth Mask.
         # The model is predicting the tumor for the MIDDLE slice only.

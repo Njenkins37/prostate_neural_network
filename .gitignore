@@ -12,6 +12,8 @@ labels/*
 *.json
 *.log
 *.egg-info
+*.pth
+*.png
 
 # OS generated files.
 .DS_Store
