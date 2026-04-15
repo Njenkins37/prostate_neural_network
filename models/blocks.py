@@ -7,10 +7,11 @@ class DoubleConv(nn.Module):
     Standard UNet building block: Two sequential Convolution -> BatchNorm -> ReLU layers.
     """
     def __init__(self, in_channels, out_channels):
+        # Here, the channel is 3 slides from the spatial Z-axis when using 2.5D U-net.
         super().__init__()
         self.double_conv = nn.Sequential(
             nn.Conv2d(in_channels, out_channels, kernel_size=3, padding=1),
-            nn.BatchNorm2d(out_channels),
+            nn.BatchNorm2d(out_channels), # Normalize each channel independently with 2 parameters.
             nn.ReLU(inplace=True),
             nn.Conv2d(out_channels, out_channels, kernel_size=3, padding=1),
             nn.BatchNorm2d(out_channels),
@@ -26,11 +27,14 @@ class CrossAttentionBlock(nn.Module):
     Spatial Cross-Attention bottleneck.
     T2 provides the Query (Anatomy). ADC provides the Key and Value (Function).
     """
-    def __init__(self, in_channels):
+    def __init__(self, in_channels, reduction_ratio=8):
         super().__init__()
-        # Reduce channels by a factor of 8 for Q and K to save memory (standard practice).
-        self.query_conv = nn.Conv2d(in_channels, in_channels // 8, kernel_size=1)
-        self.key_conv = nn.Conv2d(in_channels, in_channels // 8, kernel_size=1)
+        # Reduce channels by a factor of 8 for Q and K to save memory. References:
+        # https://arxiv.org/pdf/1711.07971
+        # https://arxiv.org/pdf/1805.08318
+        # Typical values are 2, 4, 8 for the reduction ratio.
+        self.query_conv = nn.Conv2d(in_channels, in_channels // reduction_ratio, kernel_size=1)
+        self.key_conv = nn.Conv2d(in_channels, in_channels // reduction_ratio, kernel_size=1)
         self.value_conv = nn.Conv2d(in_channels, in_channels, kernel_size=1)
         
         # Learnable parameter to scale the attention output before adding the residual.
@@ -61,6 +65,7 @@ class CrossAttentionBlock(nn.Module):
             energy = torch.bmm(proj_query, proj_key)  # (B, N, N), batch matrix multiplication.
             scale_factor = proj_query.size(-1) ** 0.5
             energy = energy / scale_factor
+            # Each row is t2, so apply softmax for each row, look at ADC images, apply softmax row-wise.
             attention_map = F.softmax(energy, dim=-1)
 
             # Apply Attention to ADC Values.
