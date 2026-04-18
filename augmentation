@@ -1,0 +1,129 @@
+import os
+import glob
+import gc
+import numpy as np
+from monai.transforms import (
+    Compose,
+    RandRotated,
+    RandFlipd,
+    RandAffined,
+    RandGridDistortiond,
+    RandAdjustContrastd,
+    RandGaussianNoised,
+    RandGaussianSmoothd,
+    RandBiasFieldd,
+    EnsureChannelFirstd,
+    SqueezeDimd,
+)
+from loader import load_picai_case, pos_list, IMAGES_ROOT, LABELS_ROOT
+
+def augment_raw_dataset(
+    output_dir="data/augmented_raw",
+    num_augmentations=2,
+    case_ids=None, #Defaults to all pos_list.
+    max_cases=None, #Optional cap on number of selected cases
+):
+    """
+    Reads RAW PI-CAI cases (before cropping), applies MONAI transforms, and saves them as .npz to be picked up by preprocessing.
+
+    """
+    os.makedirs(output_dir, exist_ok=True)
+
+    selected_cases = list(pos_list if case_ids is None else case_ids)
+    if max_cases is not None:
+        max_cases = int(max_cases)
+        if max_cases <= 0:
+            raise ValueError("max_cases must be > 0 when provided")
+        selected_cases = selected_cases[:max_cases]
+
+    # All keys for spatial transforms
+    all_keys = ["t2", "adc", "gland_t2", "lesion_t2"]
+    img_keys = ["t2", "adc"]
+    
+    spatial_modes = ("bilinear", "bilinear", "nearest", "nearest")
+
+    train_transforms = Compose([
+        EnsureChannelFirstd(keys=all_keys, channel_dim="no_channel"),
+        
+        # --- SPATIAL TRANSFORMS ---
+        # 1. Horizontal Flipping
+        RandFlipd(keys=all_keys, spatial_axis=0, prob=0.5),
+        
+        # 2. In-plane rotations (+- 20 degrees) for clearer visual effect in axial slices
+        RandRotated(keys=all_keys, range_z=20 * np.pi / 180, prob=0.5, keep_size=True, mode=spatial_modes),
+        
+        # 3. Translation / Shift (+- 3%)
+        RandAffined(keys=all_keys, translate_range=(0.03, 0.03, 0.0), prob=0.5, mode=spatial_modes),
+        
+        # 4. Elastic Deformation / Grid Distortion
+        RandGridDistortiond(keys=all_keys, prob=0.5, distort_limit=(-0.05, 0.05), mode=spatial_modes),
+        
+        # --- INTENSITY TRANSFORMS ---
+        # 5/8. Random Contrast/Gamma
+        RandAdjustContrastd(keys=img_keys, prob=0.5, gamma=(0.75, 1.35)),
+        
+        # 6. Gaussian Noise
+        RandGaussianNoised(keys=img_keys, prob=0.6, mean=0.0, std=0.09),
+        
+        # 7. Gaussian Blur
+        RandGaussianSmoothd(keys=img_keys, sigma_x=(0.2, 1.0), sigma_y=(0.2, 1.0), prob=0.5),
+        
+        # 9. MRI Bias Field (simulating magnetic field inhomogeneities)
+        RandBiasFieldd(keys=img_keys, degree=3, coeff_range=(0.0, 0.15), prob=0.6),
+        
+        SqueezeDimd(keys=all_keys, dim=0)
+    ])
+
+    print(
+        f"Selected {len(selected_cases)} cases "
+        f"(from {len(pos_list)} positives). Generating {num_augmentations} augmentations per case..."
+    )
+
+    for case_id in selected_cases:
+        try:
+            data = load_picai_case(case_id, IMAGES_ROOT, LABELS_ROOT)
+        except Exception as e:
+            print(f"Skipping {case_id}: {e}")
+            continue
+
+        raw_t2 = data["t2"]
+        raw_adc = data["adc"]
+        raw_gland = data["gland_t2"]
+        raw_lesion = data["lesion_t2"]
+
+
+        # Save Original as .npz
+        orig_save_path = os.path.join(output_dir, f"{case_id}_orig.npz")
+        np.savez_compressed(orig_save_path, t2=raw_t2, adc=raw_adc, gland_t2=raw_gland, lesion_t2=raw_lesion)
+
+        # Generate Augmented variants
+        for i in range(num_augmentations):
+            data_dict = {
+                "t2": raw_t2.copy(),
+                "adc": raw_adc.copy(),
+                "gland_t2": raw_gland.copy(),
+                "lesion_t2": raw_lesion.copy()
+            }
+
+            aug_dict = train_transforms(data_dict)
+
+            aug_save_path = os.path.join(output_dir, f"{case_id}_aug_{i}.npz")
+            np.savez_compressed(
+                aug_save_path,
+                t2=np.array(aug_dict["t2"]),
+                adc=np.array(aug_dict["adc"]),
+                gland_t2=np.array(aug_dict["gland_t2"]),
+                lesion_t2=np.array(aug_dict["lesion_t2"])
+            )
+            
+            del data_dict, aug_dict
+            gc.collect()
+
+        del data, raw_t2, raw_adc, raw_gland, raw_lesion
+        gc.collect()
+
+    total_files = len(glob.glob(os.path.join(output_dir, "*.npz")))
+    print(f"Raw augmentation complete. '{output_dir}' now contains {total_files} .npz files ready for preprocessing.")
+
+if __name__ == "__main__":
+    augment_raw_dataset()
