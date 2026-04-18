@@ -38,9 +38,15 @@ def get_crop_indices(center, size, max_dim, allow_shift=False):
 
 def extract_cookie_cutter(case_id, args, output_dir, qc_results):
     try:
-        data = load_picai_case(case_id, IMAGES_ROOT, LABELS_ROOT)
-        t2, adc = data["t2"], data["adc"]
-        gland, lesion = data["gland_t2"], data["lesion_t2"]
+        aug_file = Path("data/augmented_raw") / f"{case_id}.npz"
+        if aug_file.exists():
+            with np.load(aug_file, allow_pickle=False) as data:
+                t2, adc = data["t2"], data["adc"]
+                gland, lesion = data["gland_t2"], data["lesion_t2"]
+        else:
+            data = load_picai_case(case_id, IMAGES_ROOT, LABELS_ROOT)
+            t2, adc = data["t2"], data["adc"]
+            gland, lesion = data["gland_t2"], data["lesion_t2"]
 
         # Defensive Checks.
         if t2.shape[0] < args.crop_size or t2.shape[1] < args.crop_size:
@@ -142,15 +148,28 @@ if __name__ == "__main__":
     }
 
     logging.info(f"--- Starting Pipeline | Strategy: {args.strategy.upper()} | Crop: {args.crop_size}x{args.crop_size} ---")
-    
-    for cid in pos_list:
+
+    aug_files = sorted(Path("data/augmented_raw").glob("*.npz"))
+    if aug_files:
+        aug_cases = [f.stem for f in aug_files]
+        aug_base_ids = {stem.split("_")[0] for stem in aug_cases}
+        raw_only_cases = [str(cid) for cid in pos_list if str(cid) not in aug_base_ids]
+
+        all_cases = aug_cases + raw_only_cases
+        logging.info(f"Found {len(aug_cases)} augmented files in data/augmented_raw/. Processing these.")
+        logging.info(f"Adding {len(raw_only_cases)} raw cases not present in augmented set.")
+    else:
+        all_cases = [str(cid) for cid in pos_list]
+
+    for cid in all_cases:
         extract_cookie_cutter(cid, args, OUTPUT_DIR, qc_results)
+            
             
     # Save the tracking lists to the strategy-specific JSON file.
     with open(JSON_FILE, "w") as f:
         json.dump(qc_results, f, indent=4)
         
     logging.info(f"\nPipeline Complete ({args.strategy.upper()}).")
-    logging.info(f"Yielded {len(qc_results['clean_cases'])}/{len(pos_list)} clean cases.")
+    logging.info(f"Yielded {len(qc_results['clean_cases'])}/{len(all_cases)} clean cases.")
     logging.info(f"Logs saved to {LOG_FILE}")
     logging.info(f"Patient lists saved to {JSON_FILE}")
