@@ -40,7 +40,7 @@ from typing import Optional
 import numpy as np
 from skimage.transform import resize
 
-from utils.loader import load_picai_case, pos_list
+from utils.loader_adaptive import load_picai_case, pos_list
 
 
 # Path structure
