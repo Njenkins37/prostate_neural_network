@@ -2,7 +2,7 @@
 Adaptive preprocessing for prostate MRI
 
   1. Load T2+ ADC volumes plus gland/lesion masks via `loader.load_picai_case`.
-     Normalization/reampling done in loader
+     Normalization/resampling done in loader
   2. Build 2D bounding box around prostate plus any lesion voxels (z projection)
      Pad with existing pixels, make square capped at max_crop, clamp to image boundaries.
   3. Resize the cropped T2 and ADC to a output_size^2 x Z. Output NPZ
@@ -12,11 +12,23 @@ Adaptive preprocessing for prostate MRI
        - dataset_splits.json : list potentially to be used in models later
 Usage
 ---------------------------
-  python preprocess_adaptive.py --output_size 128 --padding 4
-  python preprocess_adaptive.py --positives_only --max_cases 50 --generate_qc
+  python preprocess_adaptive.py --output_size 128 --padding 16
+  python preprocess_adaptive.py --positives_only --max_cases 50
 
-  >>> from scripts.preprocess_adaptive import run_preprocess, quick_sample_run
-  >>> summary = quick_sample_run(n=5)
+  Optional flags:
+    --output_size   final H=W in pixels (default 128)
+    --padding       pixels of context around gland+lesion bbox (default 16)
+    --max_crop      hard cap on pre-resize square edge (default 384)
+    --positives_only  restrict to IDs in loader.pos_list
+    --max_cases     cap iterations for smoke tests
+    --images_root / --labels_root / --output_dir
+
+Python / notebook:
+    import sys
+    sys.path.append("scripts")          # adjust path per system
+    from preprocess_adaptive import run_preprocess
+    summary = run_preprocess(max_cases=20, output_size=128, padding=16)
+    summary["clean_cases"]              # IDs that produced a <case>_clean.npz
 """
 
 import argparse
@@ -140,8 +152,8 @@ def compute_adaptive_crop(gland_bbox, lesion_bbox, padding, max_crop, image_shap
     # Make square using the larger dim (prostate+lesion). +1 for accurate count of width/height
     w = x_max - x_min + 1
     h = y_max - y_min + 1
-    # Cap at max_corp as limit
-    crop_size =max(w, h)
+    # Cap at max_crop as limit
+    crop_size = min(max(w, h), max_crop)
 
     # Center the square crop on the combined center
     cx = (x_min + x_max) // 2
@@ -180,9 +192,11 @@ def resize_volume(volume: np.ndarray, target_hw: int, order: int) -> np.ndarray:
     Resize a 3D volume (X, Y, Z) in the XY plane to target_hw x target_hw.
     Preserve Z (slice) dimension.
 
-    order = controls interpolation:
-      order=1 bilinear for continuous images (T2, ADC).
-      order=0 nearest  for binary masks
+    order = controls interpolation (scipy/skimage spline orders):
+      order=1 bilinear for continuous images (T2, ADC)
+      order=3 cubic B-spline for continuous images (T2, ADC) -- matches nnU-Net.
+      order=0 nearest neighbor for categorical masks (gland, lesion, zone)
+              so integer label values survive intact.
     """
     x, y, z = volume.shape
     # No change if dims already correct
@@ -227,9 +241,9 @@ def crop_and_resize(volume, gland_mask, lesion_mask, zone_mask, output_size, pad
         # Resize the crop to output size, bilinear, nearest neighbor
         # These can be improved by higher order. Probably better to use 3rd and 1st orders (labels) across all
         resize_volume(volume_crop, output_size, order=3), # consider a 3rd order spline from papers
-        resize_volume(gland_crop, output_size, order=1),  # consider a 1st order linear
-        resize_volume(lesion_crop, output_size, order=1),
-        resize_volume(zone_crop, output_size, order=1),
+        resize_volume(gland_crop,  output_size, order=0), # consider a 1st order linear
+        resize_volume(lesion_crop, output_size, order=0),
+        resize_volume(zone_crop,   output_size, order=0),
         crop    )
 
 
@@ -334,10 +348,10 @@ def process_case(case_id: str, state: RunState) -> None:
         max_crop=args.max_crop,
     )
     if adc_branch is None:
-        adc_resized = resize_volume(data["adc"], args.output_size, order=3) 
-        gland_adc_resized = resize_volume(data["gland_adc"], args.output_size, order=1)
-        lesion_adc_resized = resize_volume(data["lesion_adc"], args.output_size, order=1)
-        zone_adc_resized = resize_volume(data["zone_adc"], args.output_size, order=1)
+        adc_resized        = resize_volume(data["adc"],        args.output_size, order=3)
+        gland_adc_resized  = resize_volume(data["gland_adc"],  args.output_size, order=0)
+        lesion_adc_resized = resize_volume(data["lesion_adc"], args.output_size, order=0)
+        zone_adc_resized   = resize_volume(data["zone_adc"],   args.output_size, order=0)
     else:
         adc_resized, gland_adc_resized, lesion_adc_resized, zone_adc_resized, _ = adc_branch
 
