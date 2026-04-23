@@ -5,3 +5,6 @@ SimpleITK
 matplotlib
 scikit-image
 scipy
+pyyaml
+torch
+tqdm
