@@ -5,6 +5,7 @@ import torch.nn as nn
 from torch.utils.data import DataLoader, Dataset
 import torchvision.transforms.functional as TF
 import sys
+import logging
 
 sys.path.append("/Users/nickjenkins/CS7642_prostate")
 from models import UNet
@@ -20,6 +21,26 @@ device = torch.device(
     if torch.cuda.is_available()
     else "mps" if torch.backends.mps.is_available() else "cpu"
 )
+
+logger = logging.getLogger("UNet")
+logger.setLevel(logging.DEBUG)
+
+console_handler = logging.StreamHandler() 
+file_handler = logging.FileHandler("models.log")
+
+console_handler.setLevel(logging.INFO)
+file_handler.setLevel(logging.DEBUG)
+
+formatter = logging.Formatter(
+    "%(asctime)s | %(levelname)-8s | %(name)s | %(message)s",
+    datefmt="%Y-%m-%d %H:%M:%S"
+)
+console_handler.setFormatter(formatter)
+file_handler.setFormatter(formatter)
+
+logger.addHandler(console_handler)
+logger.addHandler(file_handler)
+
 
 
 class MRIDataset(Dataset):
@@ -149,24 +170,6 @@ def recall_score(preds: torch.tensor, targets: torch.tensor)-> float:
     return recall.mean().item()
 
 
-def split_files(all_files: list, train_ratio=0.7, val_ratio=0.15) -> tuple[list, list, list]:
-        """
-        Splits a file list into train, val, and test sets at the patient level.
-        Defaults to a 70/15/15 split.
-
-        params:
-                all_files: list - full list of .pt file paths
-                train_ratio: float - proportion for training
-                val_ratio: float  - proportion for validation (remainder becomes test)
-        returns:
-                train_files, val_files, test_files: tuple of file path lists
-        """
-        n = len(all_files)
-        train_end = int(train_ratio * n)
-        val_end = train_end + int(val_ratio * n)
-        return all_files[:train_end], all_files[train_end:val_end], all_files[val_end:]
-
-
 def reg_unet():
     """
     The main training function for the 2D UNet. Saves the model to the current
@@ -182,11 +185,11 @@ def reg_unet():
         os.path.join("../output", "*.pt")
     )  # Necessary for file imports. Could be improved
     # Uncomment for debug runs
-    # all_files = all_files[100:700]
+    file_dict = get_splits()
+    train_files = file_dict.get("train")
+    val_files = file_dict.get('val')
 
-    train_files, val_files, test_files = split_files(all_files)
-    
-    print(f"Train patients: {len(train_files)} | Val patients: {len(val_files)} | Test Patients: {len(test_files)}")
+    logger.info(f"Train patients: {len(train_files)} | Val patients: {len(val_files)}")
     train_dice_list:list = []
     val_dice_list:list = []
     val_losses:list = []
@@ -210,7 +213,7 @@ def reg_unet():
     )
     focal = FocalLoss(alpha=0.75, gamma=2.0)
 
-    for epoch in range(30):
+    for epoch in range(28):
         ############### Training ################
         model.train()
         train_loss, train_dice_total, train_correct, train_total = 0.0, 0.0, 0, 0
@@ -244,6 +247,7 @@ def reg_unet():
                 outputs = model(images)
 
                 loss = focal.forward(outputs, masks) + dice_loss(outputs, masks)
+                val_loss += loss.item()
                 val_dice_score = dice_score(outputs, masks)
                 val_dice_total += val_dice_score
                 val_recall += recall_score(outputs, masks)
@@ -277,6 +281,76 @@ def reg_unet():
             "unet.pth",
         )
     return train_dice_list, val_dice_list, train_losses, val_losses
+
+def evaluate(model_path: str = "unet.pth") -> dict:
+    """
+    Evaluates the saved model on the held-out test set.
+    
+    params:
+            model_path: str - path to the saved .pth checkpoint
+    returns:
+            metrics: dict - test dice, accuracy, precision, recall
+    """
+    file_dict = get_splits()
+    test_files = file_dict.get('test')
+    print(f"Test patients: {len(test_files)}")
+
+    test_dataset = MRIDataset(test_files)
+    test_loader = DataLoader(test_dataset, batch_size=4, shuffle=False, num_workers=4)
+
+    checkpoint = torch.load(model_path, map_location=device)
+    model = UNet(n_slices=1, n_classes=1).to(device)
+    model.load_state_dict(checkpoint["model_state_dict"])
+    model.eval()
+
+    focal = FocalLoss(alpha=0.75, gamma=2.0)
+
+    test_loss, test_dice_total = 0.0, 0.0
+    test_correct, test_total = 0, 0
+    test_prec, test_recall = 0.0, 0.0
+
+    with torch.no_grad():
+        for images, masks in test_loader:
+            images, masks = images.to(device), masks.to(device)
+            outputs = model(images)
+
+            loss = focal.forward(outputs, masks) + dice_loss(outputs, masks)
+            test_loss += loss.item()
+            test_dice_total += dice_score(outputs, masks)
+            test_prec += precision_score(outputs, masks)
+            test_recall += recall_score(outputs, masks)
+            binary_preds = (outputs > 0.0).float()
+            test_correct += (binary_preds == masks).sum().item()
+            test_total += masks.numel()
+
+    n_test = len(test_loader)
+    metrics = {
+        "loss": test_loss / n_test,
+        "dice": test_dice_total / n_test,
+        "accuracy": test_correct / test_total,
+        "precision": test_prec / n_test,
+        "recall": test_recall / n_test,
+    }
+
+    total = sum(p.numel() for p in model.parameters())
+    trainable = sum(p.numel() for p in model.parameters() if p.requires_grad)
+
+    logger.info(f"Total:\t{total:,}")
+    logger.info(f"Trainable:\t{trainable:,}")
+
+    optimizer = torch.optim.AdamW(model.parameters())
+    optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
+
+    for i, group in enumerate(optimizer.param_groups):
+        logger.info(f"Param Group {i}:")
+        for key, value in group.items():
+            if key != "params":
+                logger.info(f"{key:<20} {value}")
+
+    for key, value in metrics.items():
+        logger.info(f"{key}: {value}")
+    
+    return metrics
 
 
 class FocalLoss:
@@ -370,9 +444,25 @@ def prob_map(idx:int=5) -> None:
     plt.show()
 
 
+def get_splits() -> dict:
+    """
+    Ensure no data leakage by retruning a dictionary of files. Removes instantiation of files from
+    separate function calls. 
+
+    params:
+            None
+    returns:
+            Dict[list] - the dictionary of training values
+    """
+    all_files = sorted(glob.glob(os.path.join("../output", "*.pt")))
+    return {
+        "train": all_files[:1000],
+        "val":   all_files[1000:1250],
+        "test":  all_files[1250:],
+    }
 if __name__ == "__main__":
   
-    # reg_unet()
+    reg_unet()
     # plot()
-    prob_map()
-    # visualize_feature_maps()
+    # prob_map()
+    evaluate()
